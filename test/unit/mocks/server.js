@@ -1,5 +1,6 @@
 'use strict';
 var _ = require('lodash'),
+    BufferList = require('bl'),
     Promise = require('bluebird'),
     net = require('net'),
     expect = require('chai').expect,
@@ -15,9 +16,10 @@ function MockServer(options) {
   this._client = null;
   this._responses = [];
   this._expectedFrames = [];
+  this._seenFrames = [];
 
   _.defaults(this, options, {
-    hostname: '0.0.0.0',
+    hostname: '127.0.0.1',
     port: 4321,
     serverGoesFirst: false
   });
@@ -52,15 +54,7 @@ MockServer.prototype.setup = function() {
 
       c.on('data', function(d) {
         debug('read: ', d.toString('hex'));
-        if (self._expectedFrames.length) {
-          var expectedFrame = self._expectedFrames.shift();
-          if (!!expectedFrame) {
-            debug('check: ' + expectedFrame.toString('hex'));
-            expect(d).to.eql(expectedFrame);
-          }
-        }
-
-        self._sendNextResponse();
+        self._checkExpectations(d);
       });
     });
 
@@ -73,6 +67,30 @@ MockServer.prototype.setup = function() {
       resolve();
     });
   });
+};
+
+MockServer.prototype._checkExpectations = function(data) {
+  if (this._expectedFrames.length) {
+    var idx = 0;
+    var expectedFrame = this._expectedFrames.shift();
+    while (true) {
+      if (data.length <= idx + expectedFrame.length) break;
+      if (expectedFrame === false || expectedFrame === undefined) break;
+      var actualFrame = data.slice(idx, idx + expectedFrame.length);
+      debug('expected(', expectedFrame.length, '): ' + expectedFrame.toString('hex'));
+      debug('  actual(', actualFrame.length, '): ', actualFrame.toString('hex'));
+      expect(actualFrame).to.eql(expectedFrame);
+
+      if (this._expectedFrames[0] === false) break;
+      if (idx >= data.length) break;
+
+      idx += expectedFrame.length;
+      expectedFrame = this._expectedFrames.shift();
+    }
+  }
+
+  this._seenFrames.push(new BufferList(data));
+  this._sendNextResponse();
 };
 
 MockServer.prototype.teardown = function() {
@@ -111,7 +129,7 @@ MockServer.prototype.setExpectedFrameSequence = function(expected) {
 };
 
 MockServer.prototype.setResponseSequence = function(responses) {
-  this._responses = responses.map(convertSequenceFramesToBuffers);
+  this._responses = responses;
 };
 
 MockServer.prototype._sendNextResponse = function() {
@@ -131,6 +149,11 @@ MockServer.prototype._sendResponse = function(response) {
     return;
   }
 
+  if (typeof response === 'function') {
+    response = response(this._seenFrames);
+  }
+
+  response = convertSequenceFramesToBuffers(response);
   if (typeof response !== 'string') {
     this._client.write(response, function() {
       debug('wrote: ', response.toString('hex'));
